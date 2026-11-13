@@ -33,7 +33,7 @@ const ok = (cond, msg) => {
 
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM ?? '/usr/bin/chromium' });
 
-async function open({ locale, timezoneId, delayFirst = 0 }) {
+async function open({ locale, timezoneId, delayFirst = 0, none = false }) {
   const ctx = await browser.newContext({ locale, timezoneId });
   const page = await ctx.newPage();
   const state = { calls: 0, acks: [] };
@@ -42,7 +42,7 @@ async function open({ locale, timezoneId, delayFirst = 0 }) {
     if (url.pathname.endsWith('/incidents')) {
       state.calls++;
       if (state.calls === 1 && delayFirst) await new Promise((r) => setTimeout(r, delayFirst));
-      const list = state.calls >= 3 ? [fresh, ...incidents] : incidents;
+      const list = none ? [] : state.calls >= 3 ? [fresh, ...incidents] : incidents;
       return route.fulfill({ json: { updatedAt: new Date().toISOString(), incidents: list, cursor: `c${state.calls}` } });
     }
     if (url.pathname.endsWith('/ack')) {
@@ -67,17 +67,38 @@ async function open({ locale, timezoneId, delayFirst = 0 }) {
   const sha = await page.locator('meta[name=build]').getAttribute('content');
   ok(/^[0-9a-f]{40}$/.test(sha) && (await page.getByTestId('build-sha').textContent()) === sha, `meta build and footer name the same sha (${sha})`);
 
-  await page.locator('[data-testid=incident-row][data-id="INC-1"] [data-testid=ack]').click();
+  ok((await page.locator('[data-testid=incident-row] [data-testid=ack]').count()) === 0, 'rows have no Ack button (product decision)');
+  ok(await page.getByTestId('incident-panel').isHidden(), 'panel hidden until a row is picked');
+  await page.locator('[data-testid=incident-row][data-id="INC-2"]').click();
+  ok((await page.getByTestId('incident-panel').innerText()).includes('INC-2'), 'clicking a row opens its panel, naming the incident');
+  await page.locator('[data-testid=incident-row][data-id="INC-1"]').click();
+  const panelText = await page.getByTestId('incident-panel').innerText();
+  ok(panelText.includes('INC-1') && !panelText.includes('INC-2'), 'picking another row switches the panel');
+  await page.getByTestId('panel-ack').click();
   await page.locator('[data-testid=incident-row][data-id="INC-1"] [data-testid=acked]').waitFor();
-  ok(state.acks.length === 1 && state.acks[0].id === 'INC-1' && state.acks[0].cursor?.startsWith('c'), 'Ack sends api.ack for that row with the latest cursor');
-
+  ok(state.acks.length === 1 && state.acks[0].id === 'INC-1' && state.acks[0].cursor?.startsWith('c'), 'panel Ack acks the incident the panel names, with the latest cursor');
+  ok(await page.getByTestId('panel-ack').isHidden(), 'panel shows Acked instead of Ack once acked');
+  await page.evaluate(() => {
+    window.__rowsRemoved = 0;
+    new MutationObserver((rs) => { for (const r of rs) for (const n of r.removedNodes) if (n.matches?.('[data-testid=incident-row]')) window.__rowsRemoved++; }).observe(document, { childList: true, subtree: true });
+  });
   await page.locator('[data-testid=incident-row][data-id="INC-3"]').waitFor({ timeout: 7000 });
   const ids = await page.getByTestId('incident-row').evaluateAll((els) => els.map((e) => e.dataset.id));
   ok(ids.join() === 'INC-3,INC-2,INC-1', `new incident appears at the top without a reload (${ids})`);
   ok((await page.locator('[data-testid=incident-row][data-id="INC-1"] [data-testid=acked]').count()) === 1, 'acked mark survives refreshes');
+  ok((await page.evaluate(() => window.__rowsRemoved)) === 0, 'no row is removed or moved when a new incident lands');
+  ok((await page.getByTestId('incident-panel').innerText()).includes('INC-1'), 'open panel keeps its incident when the list moves');
   const before = state.calls;
   await page.waitForTimeout(4500);
   ok(state.calls - before >= 2 && state.calls - before <= 3, `refreshes about every 2 s (${state.calls - before} calls in 4.5 s)`);
+  await ctx.close();
+}
+
+// Empty state
+{
+  const { ctx, page } = await open({ locale: 'en-GB', timezoneId: 'Europe/London', none: true });
+  await page.getByTestId('empty').waitFor();
+  ok((await page.getByTestId('empty').isVisible()) && (await page.getByTestId('loader').count()) === 0, 'no incidents: empty state shows, loader gone');
   await ctx.close();
 }
 

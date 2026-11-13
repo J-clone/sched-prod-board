@@ -3,7 +3,7 @@ header, main, footer { padding: 12px 24px; }
 h1 { margin: 0; font-size: 22px; }
 .sub { margin: 2px 0 0; color: #666; }
 .list { list-style: none; margin: 0; padding: 0; max-width: 960px; }
-.row { display: grid; grid-template-columns: 90px 50px 1fr 200px auto; gap: 12px; align-items: center; min-height: 44px; padding: 0 12px; border-bottom: 1px solid #e5e5e5; background: #fff; }
+.row { display: grid; grid-template-columns: 90px 50px 1fr 180px 64px; cursor: pointer; gap: 12px; align-items: center; min-height: 44px; padding: 0 12px; border-bottom: 1px solid #e5e5e5; background: #fff; }
 .row .id { font-family: ui-monospace, monospace; }
 .row.sev1 .sev { color: #b00020; font-weight: 600; }
 .row.sev2 .sev { color: #a15c00; }
@@ -17,3 +17,23 @@ footer { color: #777; font-size: 13px; }
 .acked { color: #1a7f37; font-weight: 600; padding: 4px 14px; }
 .row.is-acked { background: #f3faf4; }
 footer code { font-family: ui-monospace, monospace; }
+main { display: grid; grid-template-columns: minmax(0, 900px) 300px; column-gap: 24px; align-items: start; }
+main > :not(.panel) { grid-column: 1; }
+.row:hover { background: #f5f5f7; }
+.row:focus-visible { outline: 2px solid #0a58ca; outline-offset: -2px; }
+.row.is-open { background: #eef4ff; box-shadow: inset 3px 0 0 #0a58ca; }
+.panel { grid-column: 2; grid-row: 1 / span 6; position: sticky; top: 12px; background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 14px 16px; }
+.panel-head { display: flex; justify-content: space-between; align-items: center; }
+.panel-title { margin: 0; font: 600 20px ui-monospace, monospace; }
+.panel-close { font-size: 20px; line-height: 1; border: 0; background: none; cursor: pointer; padding: 4px 8px; }
+.panel-fields { display: grid; grid-template-columns: 80px 1fr; gap: 4px 10px; margin: 12px 0 16px; }
+.panel-fields dt { color: #666; }
+.panel-fields dd { margin: 0; }
+.panel-ack { width: 100%; padding: 8px; font-weight: 600; }
+.panel-acked { color: #1a7f37; font-weight: 600; margin: 0; }
+@media (max-width: 900px) {
+  main { display: block; }
+  .row { grid-template-columns: 80px 44px 1fr; }
+  .row time { grid-column: 3; }
+  .panel { position: fixed; left: 0; right: 0; bottom: 0; top: auto; border-radius: 12px 12px 0 0; box-shadow: 0 -4px 16px #0002; }
+}
