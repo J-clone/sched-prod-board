@@ -6,7 +6,6 @@ const list = document.querySelector('[data-testid="incident-list"]');
 const loader = document.querySelector('[data-testid="loader"]');
 const empty = document.querySelector('[data-testid="empty"]');
 const loadError = document.querySelector('.error[data-kind="load"]');
-const ackError = document.querySelector('.error[data-kind="ack"]');
 
 // Rows are kept by incident id, so a refresh never rebuilds or moves an existing row:
 // the acked mark and the open row survive every refresh (R1, R2, R4).
@@ -43,8 +42,11 @@ const panelTitle = panel.querySelector('.panel-title');
 const panelFields = panel.querySelector('.panel-fields');
 const panelAck = panel.querySelector('[data-testid="panel-ack"]');
 const panelAcked = panel.querySelector('.panel-acked');
+const panelError = panel.querySelector('.panel-error');
 let openId = null;
 const ackedAt = new Map(); // id -> ackedAt from the ack API
+const acking = new Set(); // ids with an ack in flight: their button stays disabled
+const ackErrors = new Map(); // id -> last ack error, shown in that incident's panel
 
 function markAcked(row) {
   if (!row.querySelector('[data-testid="acked"]')) row.append(el('span', { 'data-testid': 'acked', class: 'acked' }, 'Acked'));
@@ -65,45 +67,53 @@ function fillPanel() {
     ].flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]),
   );
   const done = acked.has(i.id);
+  const busy = acking.has(i.id);
   panelAck.hidden = done;
-  panelAck.disabled = false;
-  panelAck.textContent = `Ack ${i.id}`;
+  panelAck.disabled = busy;
+  panelAck.textContent = busy ? `Acking ${i.id}…` : `Ack ${i.id}`;
   panelAcked.hidden = !done;
   panelAcked.textContent = done ? `Acked ${ackedAt.has(i.id) ? localTime(ackedAt.get(i.id)) : ''}`.trim() : '';
+  panelError.hidden = !ackErrors.has(i.id);
+  panelError.textContent = ackErrors.get(i.id) ?? '';
 }
 
-function openPanel(id) {
+function openPanel(id, { focus = false } = {}) {
   rows.get(openId)?.classList.remove('is-open');
   rows.get(openId)?.removeAttribute('aria-current');
   openId = id;
   rows.get(id)?.classList.add('is-open');
   rows.get(id)?.setAttribute('aria-current', 'true');
-  ackError.hidden = true;
   fillPanel();
   panel.hidden = false;
+  if (focus) panelTitle.focus();
 }
 
 function closePanel() {
-  rows.get(openId)?.classList.remove('is-open');
-  rows.get(openId)?.removeAttribute('aria-current');
+  const row = rows.get(openId);
+  const hadFocus = panel.contains(document.activeElement);
+  row?.classList.remove('is-open');
+  row?.removeAttribute('aria-current');
   openId = null;
   panel.hidden = true;
+  if (hadFocus) row?.focus();
 }
 
 async function onPanelAck() {
   const id = openId; // the incident the panel names, whatever the list does meanwhile
-  if (!id || acked.has(id)) return;
-  panelAck.disabled = true;
-  panelAck.textContent = `Acking ${id}…`;
+  if (!id || acked.has(id) || acking.has(id)) return;
+  acking.add(id);
+  ackErrors.delete(id);
+  fillPanel();
   try {
     const reply = await ack(id);
     acked.add(id);
     ackedAt.set(id, reply.ackedAt);
     const row = rows.get(id);
     if (row) markAcked(row);
-    ackError.hidden = true;
   } catch (err) {
-    showError(ackError, `Ack failed for ${id}: ${err.message}`); // stays until the next good ack
+    ackErrors.set(id, `Ack failed for ${id}: ${err.message}`); // stays until a good ack of this incident
+  } finally {
+    acking.delete(id);
   }
   if (openId === id) fillPanel();
 }
@@ -115,7 +125,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 function buildRow(i) {
-  const row = el('li', { 'data-testid': 'incident-row', 'data-id': i.id, class: `row ${i.severity}`, role: 'button', tabindex: '0', 'aria-label': `Open ${i.id}` });
+  const row = el('li', { 'data-testid': 'incident-row', 'data-id': i.id, class: `row ${i.severity}`, tabindex: '0', 'aria-controls': 'incident-panel', 'aria-haspopup': 'dialog' });
   row.append(
     el('span', { class: 'id' }, i.id),
     el('span', { class: 'sev' }, i.severity),
@@ -127,7 +137,7 @@ function buildRow(i) {
   row.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
-      openPanel(i.id);
+      openPanel(i.id, { focus: true });
     }
   });
   return row;
@@ -142,11 +152,13 @@ function updateRow(row, i) {
   }
 }
 
-// incidents arrive newest first; the list follows that order, new ones at the top (R1).
+// incidents arrive newest first; new ones go in at their place, so new ones land at the top (R1).
+// An existing row is never moved: moving a row under a pointer is what product saw go wrong.
 function render(incidents) {
   const seen = new Set();
-  let prev = null;
+  let after = null; // the last row placed in this pass; a new row goes right after it, or at the top
   for (const i of incidents) {
+    if (seen.has(i.id)) continue; // the same id twice in one answer
     seen.add(i.id);
     data.set(i.id, i);
     let row = rows.get(i.id);
@@ -154,10 +166,10 @@ function render(incidents) {
     else {
       row = buildRow(i);
       rows.set(i.id, row);
+      if (after) after.after(row);
+      else list.prepend(row);
     }
-    const want = prev ? prev.nextSibling : list.firstChild;
-    if (want !== row) list.insertBefore(row, want);
-    prev = row;
+    after = row;
   }
   for (const [id, row] of rows) {
     if (!seen.has(id)) {
