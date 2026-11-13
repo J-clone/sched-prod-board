@@ -1,0 +1,128 @@
+// Records the deployed board in use: open-board, watch-board, ack-incident (one real ack).
+// Usage: node scripts/record.mjs <board url> <out dir>
+// Adds a recording overlay (cursor dot, elapsed time, UTC clock) that is not part of the build.
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { chromium } from 'playwright';
+
+const [url, out = 'recordings'] = process.argv.slice(2);
+mkdirSync(out, { recursive: true });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM ?? '/usr/bin/chromium' });
+const size = { width: 1280, height: 900 };
+const ctx = await browser.newContext({
+  viewport: size,
+  locale: 'en-GB',
+  timezoneId: 'Europe/Amsterdam',
+});
+const t0 = Date.now();
+const at = (ms = Date.now()) => {
+  const s = Math.floor((ms - t0) / 1000);
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+};
+const events = [];
+const note = (what, extra = {}) => {
+  const e = { at: at(), ms: Date.now() - t0, utc: new Date().toISOString(), what, ...extra };
+  events.push(e);
+  console.log(JSON.stringify(e));
+};
+
+await ctx.addInitScript((start) => {
+  addEventListener('DOMContentLoaded', () => {
+    const dot = document.createElement('div');
+    dot.style.cssText = 'position:fixed;z-index:99999;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;background:rgba(220,0,60,.55);border:2px solid #c00;pointer-events:none;left:-40px;top:-40px;transition:transform .1s';
+    const clock = document.createElement('div');
+    clock.style.cssText = 'position:fixed;z-index:99999;right:8px;bottom:8px;font:12px ui-monospace,monospace;background:#000c;color:#fff;padding:4px 8px;border-radius:4px;pointer-events:none';
+    document.body.append(dot, clock);
+    addEventListener('mousemove', (e) => { dot.style.left = `${e.clientX}px`; dot.style.top = `${e.clientY}px`; }, true);
+    addEventListener('mousedown', () => { dot.style.transform = 'scale(1.8)'; }, true);
+    addEventListener('mouseup', () => { dot.style.transform = ''; }, true);
+    const tick = () => {
+      const s = Math.floor((Date.now() - start) / 1000);
+      const mmss = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+      clock.textContent = `recording ${mmss} · ${new Date().toISOString().slice(11, 19)} UTC`;
+      requestAnimationFrame(tick);
+    };
+    tick();
+  });
+}, t0);
+
+const page = await ctx.newPage();
+// Frames come from Chromium's screencast and go to the system ffmpeg; video time 0 is t0.
+const framesDir = `${out}/frames`;
+rmSync(framesDir, { recursive: true, force: true });
+mkdirSync(framesDir, { recursive: true });
+const frames = [];
+const cdp = await ctx.newCDPSession(page);
+cdp.on('Page.screencastFrame', ({ data, metadata, sessionId }) => {
+  const file = `f${String(frames.length).padStart(6, '0')}.jpg`;
+  writeFileSync(`${framesDir}/${file}`, Buffer.from(data, 'base64'));
+  frames.push({ file, ms: metadata.timestamp * 1000 });
+  cdp.send('Page.screencastFrameAck', { sessionId }).catch(() => {});
+});
+await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 85, maxWidth: size.width, maxHeight: size.height });
+const ackReplies = [];
+if (process.env.DRY) {
+  // Dry run: answer the ack locally so no real ack reaches the course.
+  await page.route('**/api/ack**', (route) => route.fulfill({ json: { id: new URL(route.request().url()).searchParams.get('id'), ackedAt: new Date().toISOString(), receipt: 'dry-run' } }));
+}
+page.on('response', async (res) => {
+  if (new URL(res.url()).pathname.endsWith('/ack')) ackReplies.push({ status: res.status(), body: await res.json().catch(() => null) });
+});
+
+note('open-board: navigate', { url });
+await page.goto(url);
+await page.getByTestId('incident-row').first().waitFor({ timeout: 20000 });
+const sha = await page.locator('meta[name=build]').getAttribute('content');
+note('open-board: incidents on screen', { sha, rows: await page.getByTestId('incident-row').count(), loader: await page.getByTestId('loader').count() });
+await page.mouse.move(640, 120);
+await page.waitForTimeout(3000);
+
+const topId = () => page.getByTestId('incident-row').first().getAttribute('data-id');
+async function waitForNewTop(timeout = 30000) {
+  const before = await topId();
+  await page.waitForFunction((b) => document.querySelector('[data-testid=incident-row]')?.dataset.id !== b, before, { timeout, polling: 50 });
+  const now = await topId();
+  note('watch-board: new incident at top without reload', { id: now, previousTop: before });
+  return now;
+}
+
+await waitForNewTop();
+await page.waitForTimeout(1500);
+await waitForNewTop();
+
+// Ack the newest incident straight after it lands, so no refresh moves the row under the pointer.
+const target = await waitForNewTop();
+const button = page.locator(`[data-testid=incident-row][data-id="${target}"] [data-testid=ack]`);
+const box = await button.boundingBox();
+await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 8 });
+await page.waitForTimeout(250);
+const rowUnderPointer = await page.evaluate(([x, y]) => document.elementFromPoint(x, y)?.closest('[data-testid=incident-row]')?.dataset.id, [box.x + box.width / 2, box.y + box.height / 2]);
+note('ack-incident: click Ack', { target, rowUnderPointer });
+await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+await page.locator(`[data-testid=incident-row][data-id="${target}"] [data-testid=acked]`).waitFor({ timeout: 10000 });
+note('ack-incident: row marked Acked', { target, reply: ackReplies.at(-1)?.body ? { id: ackReplies.at(-1).body.id, ackedAt: ackReplies.at(-1).body.ackedAt } : null });
+await page.mouse.move(640, 120, { steps: 8 });
+
+// Keep watching: more incidents arrive on top, the acked mark stays.
+await waitForNewTop();
+await page.waitForTimeout(1500);
+await waitForNewTop();
+const stillAcked = await page.locator(`[data-testid=incident-row][data-id="${target}"] [data-testid=acked]`).count();
+note('watch-board: acked mark still there after refreshes', { target, stillAcked });
+await page.waitForTimeout(2000);
+
+await cdp.send('Page.stopScreencast');
+await ctx.close();
+await browser.close();
+const end = Date.now();
+const lines = frames.map((f, i) => {
+  const from = i === 0 ? t0 : f.ms;
+  const to = i + 1 < frames.length ? frames[i + 1].ms : end;
+  return `file '${f.file}'\nduration ${Math.max(0.001, (to - from) / 1000).toFixed(3)}`;
+});
+writeFileSync(`${framesDir}/list.txt`, `${lines.join('\n')}\nfile '${frames.at(-1).file}'\n`);
+const webm = `${out}/board-${sha.slice(0, 7)}.mp4`;
+execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', `${framesDir}/list.txt`, '-vf', 'fps=25,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p', '-c:v', 'libx264', '-preset', 'medium', '-crf', '23', '-movflags', '+faststart', webm]);
+note('video written', { frames: frames.length, seconds: (end - t0) / 1000 });
+writeFileSync(`${out}/record-${sha.slice(0, 7)}.json`, JSON.stringify({ url, sha, t0: new Date(t0).toISOString(), events, ackReplies }, null, 2));
+console.log(webm);
