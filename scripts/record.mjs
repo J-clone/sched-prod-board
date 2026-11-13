@@ -86,12 +86,40 @@ async function waitForNewTop(timeout = 30000) {
   return now;
 }
 
+const race = Boolean(process.env.RACE);
+const rowAt = (x, y) => page.evaluate(([px, py]) => document.elementFromPoint(px, py)?.closest('[data-testid=incident-row]')?.dataset.id ?? null, [x, y]);
+let target;
+if (race) {
+  // RACE=1: click like a person. Pick a sev1 row, move to its Ack, read, click. The board does not
+  // hold still meanwhile: the click goes the moment the list changes, at the same spot on screen.
+  const seen = await page.getByTestId('incident-row').evaluateAll((els) => els.map((e) => ({ id: e.dataset.id, cls: e.className })));
+  target = (seen.find((r, i) => i > 0 && r.cls.includes('sev1')) ?? seen[1]).id;
+  const aim = await page.locator(`[data-testid=incident-row][data-id="${target}"] [data-testid=ack]`).boundingBox();
+  const x = aim.x + aim.width / 2;
+  const y = aim.y + aim.height / 2;
+  await page.mouse.move(x, y, { steps: 15 });
+  note('ack-incident: pointer on Ack, reading the row', { expected: target, rowUnderPointer: await rowAt(x, y) });
+  const before = await topId();
+  await page.waitForFunction((b) => document.querySelector('[data-testid=incident-row]')?.dataset.id !== b, before, { timeout: 30000, polling: 'raf' });
+  await page.mouse.click(x, y);
+  note('ack-incident: click Ack (a new incident landed on top at that moment)', { expected: target, rowUnderPointerAtClick: await rowAt(x, y), newTop: await topId() });
+  await page.getByTestId('acked').first().waitFor({ timeout: 10000 });
+  const reply = ackReplies.at(-1)?.body;
+  const markedRow = await page.getByTestId('acked').first().evaluate((e) => e.closest('[data-testid=incident-row]').dataset.id);
+  note('ack-incident: acked', { expected: target, got: reply?.id, markedRow, ackedAt: reply?.ackedAt });
+  await page.mouse.move(640, 60, { steps: 8 });
+  await waitForNewTop();
+  await page.waitForTimeout(1500);
+  await waitForNewTop();
+  note('watch-board: board after the race', { expectedStillAckable: await page.locator(`[data-testid=incident-row][data-id="${target}"] [data-testid=ack]`).count() });
+  await page.waitForTimeout(2000);
+} else {
 await waitForNewTop();
 await page.waitForTimeout(1500);
 await waitForNewTop();
 
 // Ack the newest incident straight after it lands, so no refresh moves the row under the pointer.
-const target = await waitForNewTop();
+target = await waitForNewTop();
 const button = page.locator(`[data-testid=incident-row][data-id="${target}"] [data-testid=ack]`);
 const box = await button.boundingBox();
 await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 8 });
@@ -110,6 +138,7 @@ await waitForNewTop();
 const stillAcked = await page.locator(`[data-testid=incident-row][data-id="${target}"] [data-testid=acked]`).count();
 note('watch-board: acked mark still there after refreshes', { target, stillAcked });
 await page.waitForTimeout(2000);
+}
 
 await cdp.send('Page.stopScreencast');
 await ctx.close();
@@ -121,8 +150,9 @@ const lines = frames.map((f, i) => {
   return `file '${f.file}'\nduration ${Math.max(0.001, (to - from) / 1000).toFixed(3)}`;
 });
 writeFileSync(`${framesDir}/list.txt`, `${lines.join('\n')}\nfile '${frames.at(-1).file}'\n`);
-const webm = `${out}/board-${sha.slice(0, 7)}.mp4`;
+const tag = `${sha.slice(0, 7)}${race ? '-race' : ''}`;
+const webm = `${out}/board-${tag}.mp4`;
 execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', `${framesDir}/list.txt`, '-vf', 'fps=25,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p', '-c:v', 'libx264', '-preset', 'medium', '-crf', '23', '-movflags', '+faststart', webm]);
 note('video written', { frames: frames.length, seconds: (end - t0) / 1000 });
-writeFileSync(`${out}/record-${sha.slice(0, 7)}.json`, JSON.stringify({ url, sha, t0: new Date(t0).toISOString(), events, ackReplies }, null, 2));
+writeFileSync(`${out}/record-${tag}.json`, JSON.stringify({ url, sha, t0: new Date(t0).toISOString(), events, ackReplies }, null, 2));
 console.log(webm);
