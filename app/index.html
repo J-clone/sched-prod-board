@@ -16,8 +16,9 @@
     <main data-testid="board">
       <p data-testid="loader" class="loader" role="status" aria-live="polite">Loading incidents…</p>
       <p data-testid="empty" class="empty" hidden>No incidents tonight.</p>
-      <p class="error" role="alert" hidden></p>
-      <ul data-testid="incident-list" class="list" aria-live="polite"></ul>
+      <p class="error" data-kind="load" role="alert" hidden></p>
+      <p class="error" data-kind="ack" role="alert" hidden></p>
+      <ul data-testid="incident-list" class="list"></ul>
     </main>
     <footer>sched-prod incident board · build <code data-testid="build-sha">__BUILD_SHA__</code></footer>
   </body>

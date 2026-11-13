@@ -5,7 +5,8 @@ const REFRESH_MS = 2000; // R4
 const list = document.querySelector('[data-testid="incident-list"]');
 const loader = document.querySelector('[data-testid="loader"]');
 const empty = document.querySelector('[data-testid="empty"]');
-const errorBox = document.querySelector('.error');
+const loadError = document.querySelector('.error[data-kind="load"]');
+const ackError = document.querySelector('.error[data-kind="ack"]');
 
 // Rows are kept by incident id, so a refresh never rebuilds a row: the Ack button
 // and the acked mark survive every refresh (R1, R2, R4).
@@ -49,10 +50,11 @@ async function onAck(id, row, button) {
     const reply = await ack(id);
     acked.add(id);
     markAcked(row, reply);
+    ackError.hidden = true;
   } catch (err) {
     button.disabled = false;
     button.textContent = 'Ack';
-    showError(`Ack failed for ${id}: ${err.message}`);
+    showError(ackError, `Ack failed for ${id}: ${err.message}`); // stays until the next good ack
   }
 }
 
@@ -108,9 +110,9 @@ function render(incidents) {
   empty.hidden = incidents.length > 0;
 }
 
-function showError(message) {
-  errorBox.textContent = message;
-  errorBox.hidden = false;
+function showError(box, message) {
+  box.textContent = message;
+  box.hidden = false;
 }
 
 async function refresh() {
@@ -118,9 +120,9 @@ async function refresh() {
     const page = await fetchIncidents();
     render(page.incidents ?? []);
     loader.remove(); // R3: gone once incidents load
-    errorBox.hidden = true;
+    loadError.hidden = true;
   } catch (err) {
-    showError(`Could not load incidents: ${err.message}. Retrying.`);
+    showError(loadError, `Could not load incidents: ${err.message}. Retrying.`);
   } finally {
     setTimeout(refresh, REFRESH_MS); // R4: one request at a time, every 2 s
   }
