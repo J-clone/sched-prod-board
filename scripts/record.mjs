@@ -87,9 +87,54 @@ async function waitForNewTop(timeout = 30000) {
 }
 
 const race = Boolean(process.env.RACE);
+const panelMode = Boolean(process.env.PANEL);
 const rowAt = (x, y) => page.evaluate(([px, py]) => document.elementFromPoint(px, py)?.closest('[data-testid=incident-row]')?.dataset.id ?? null, [x, y]);
 let target;
-if (race) {
+if (panelMode) {
+  // PANEL=1 (build after product's decision): the same race as RACE=1, then the panel catches it.
+  // A person picks a sev1 row and clicks it as a new incident lands; the panel names the incident that
+  // was clicked; the person reads it, picks the row they meant, and acks from the panel.
+  const seen = await page.getByTestId('incident-row').evaluateAll((els) => els.map((e) => ({ id: e.dataset.id, cls: e.className })));
+  target = (seen.find((r, i) => i > 0 && r.cls.includes('sev1')) ?? seen[1]).id;
+  const aim = await page.locator(`[data-testid=incident-row][data-id="${target}"]`).boundingBox();
+  const x = aim.x + aim.width * 0.4;
+  const y = aim.y + aim.height / 2;
+  await page.mouse.move(x, y, { steps: 15 });
+  note('ack-incident: pointer on the row, reading it', { expected: target, rowUnderPointer: await rowAt(x, y) });
+  const before = await topId();
+  await page.waitForFunction((b) => document.querySelector('[data-testid=incident-row]')?.dataset.id !== b, before, { timeout: 30000, polling: 'raf' });
+  await page.mouse.click(x, y);
+  const panelSays = async () => (await page.getByTestId('incident-panel').locator('.panel-title').textContent())?.trim();
+  note('ack-incident: click (a new incident landed on top at that moment)', { expected: target, rowUnderPointerAtClick: await rowAt(x, y), newTop: await topId() });
+  await page.getByTestId('incident-panel').waitFor();
+  const first = await panelSays();
+  note('ack-incident: panel opens and names an incident', { expected: target, panelNames: first, acksSoFar: ackReplies.length });
+  await page.waitForTimeout(1800); // reading the panel
+  if (first !== target) {
+    const row = page.locator(`[data-testid=incident-row][data-id="${target}"]`);
+    const b2 = await row.boundingBox();
+    await page.mouse.move(b2.x + b2.width * 0.4, b2.y + b2.height / 2, { steps: 10 });
+    await page.mouse.click(b2.x + b2.width * 0.4, b2.y + b2.height / 2);
+    await page.waitForTimeout(300);
+    note('ack-incident: wrong incident in the panel, picked the row meant', { expected: target, panelNames: await panelSays() });
+    await page.waitForTimeout(1500);
+  }
+  const ackBtn = page.getByTestId('panel-ack');
+  const b3 = await ackBtn.boundingBox();
+  await page.mouse.move(b3.x + b3.width / 2, b3.y + b3.height / 2, { steps: 10 });
+  await page.waitForTimeout(300);
+  note('ack-incident: click panel Ack', { expected: target, panelNames: await panelSays(), button: (await ackBtn.textContent())?.trim() });
+  await page.mouse.click(b3.x + b3.width / 2, b3.y + b3.height / 2);
+  await page.locator(`[data-testid=incident-row][data-id="${target}"] [data-testid=acked]`).waitFor({ timeout: 10000 });
+  const reply = ackReplies.at(-1)?.body;
+  note('ack-incident: acked', { expected: target, got: reply?.id, acks: ackReplies.length, ackedAt: reply?.ackedAt });
+  await page.mouse.move(640, 60, { steps: 8 });
+  await waitForNewTop();
+  await page.waitForTimeout(1500);
+  await waitForNewTop();
+  note('watch-board: after more arrivals', { acked: await page.getByTestId('acked').evaluateAll((els) => els.map((e) => e.closest('[data-testid=incident-row]').dataset.id)), panelNames: await panelSays() });
+  await page.waitForTimeout(2000);
+} else if (race) {
   // RACE=1: click like a person. Pick a sev1 row, move to its Ack, read, click. The board does not
   // hold still meanwhile: the click goes the moment the list changes, at the same spot on screen.
   const seen = await page.getByTestId('incident-row').evaluateAll((els) => els.map((e) => ({ id: e.dataset.id, cls: e.className })));
@@ -150,7 +195,7 @@ const lines = frames.map((f, i) => {
   return `file '${f.file}'\nduration ${Math.max(0.001, (to - from) / 1000).toFixed(3)}`;
 });
 writeFileSync(`${framesDir}/list.txt`, `${lines.join('\n')}\nfile '${frames.at(-1).file}'\n`);
-const tag = `${sha.slice(0, 7)}${race ? '-race' : ''}`;
+const tag = `${sha.slice(0, 7)}${panelMode ? '-panel' : race ? '-race' : ''}`;
 const webm = `${out}/board-${tag}.mp4`;
 execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', `${framesDir}/list.txt`, '-vf', 'fps=25,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p', '-c:v', 'libx264', '-preset', 'medium', '-crf', '23', '-movflags', '+faststart', webm]);
 note('video written', { frames: frames.length, seconds: (end - t0) / 1000 });
